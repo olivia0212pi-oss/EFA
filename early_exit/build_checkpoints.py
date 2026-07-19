@@ -95,6 +95,7 @@ def main() -> None:
         model=model_config["generation"],
         dtype=model_config["dtype"],
         gpu_memory_utilization=float(model_config["gpu_memory_utilization"]),
+        max_model_len=int(model_config["max_model_len"]),
         trust_remote_code=bool(model_config.get("trust_remote_code", False)),
         seed=int(config["seed"]),
     )
