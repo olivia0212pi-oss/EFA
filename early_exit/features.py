@@ -47,7 +47,14 @@ def deer_confidence(trial_answer_logprobs: Sequence[float]) -> float:
 
 
 def entropy_and_margin(top_logprobs: Sequence[float]) -> tuple[float, float]:
-    """Entropy and top1-top2 margin from a token's top-k logprobs (descending)."""
+    """Entropy and top1-top2 margin restricted to the top-k logprobs (descending)
+    of a single decision token (the first token of the forced trial answer).
+
+    This is entropy over the renormalized top-k slice, not the full
+    vocabulary distribution -- it approximates how contested the model's
+    immediate next token is among its most likely candidates, not the
+    model's true uncertainty over every possible token.
+    """
     finite = [lp for lp in top_logprobs if np.isfinite(lp)]
     if not finite:
         return 0.0, 0.0
@@ -58,19 +65,28 @@ def entropy_and_margin(top_logprobs: Sequence[float]) -> tuple[float, float]:
     return entropy, margin
 
 
-def classify_state(current_correct: bool, final_correct: bool) -> str:
+def classify_state(current_correct: bool, persistent_correct: bool, final_correct: bool) -> str:
     """Four-way state used to reason about stop safety at a checkpoint.
 
-    correct_stable: right now and stays right -> ideal stop point.
-    correct_unstable: right now but the full trace later goes wrong -> the
-        dangerous false-positive-early-exit case.
-    incorrect_recoverable: wrong now but the full trace fixes itself -> must
-        not stop here.
-    incorrect_terminal: wrong now and stays wrong -> not a stop candidate.
+    correct_stable: right now, and every checkpoint from here to the end
+        stays right (persistent_correct) -> a genuinely safe stop point.
+    correct_unstable: right now, but persistent_correct is False -> some
+        later checkpoint drifts wrong before the trace is done, even if it
+        happens to end up right by the final answer. Looks safe to stop at
+        but the oracle would not trust it; the dangerous false-positive
+        early-exit case.
+    incorrect_recoverable: wrong now but the full trace fixes itself (final
+        answer is right) -> must not stop here.
+    incorrect_terminal: wrong now and the full trace ends wrong too -> not a
+        stop candidate.
+
+    persistent_correct implies current_correct (see _analyze_record's
+    backward AND-accumulation), so (current=False, persistent=True) cannot
+    occur; only current_correct is checked in the wrong-now branches.
     """
-    if current_correct and final_correct:
+    if current_correct and persistent_correct:
         return STATE_CORRECT_STABLE
-    if current_correct and not final_correct:
+    if current_correct and not persistent_correct:
         return STATE_CORRECT_UNSTABLE
     if not current_correct and final_correct:
         return STATE_INCORRECT_RECOVERABLE

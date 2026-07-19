@@ -28,6 +28,22 @@ def _checkpoint_positions(total: int, interval: int) -> list[int]:
     return positions
 
 
+def _required_max_model_len(
+    total_token_counts: list[int], peek_max_tokens: int, current_max_model_len: int
+) -> int:
+    """Grow max_model_len so the longest record's end-of-trace probe fits.
+
+    The longest probe prompt is base_prompt + the longest record's full
+    reasoning prefix + the forced "\\boxed{" suffix, generating up to
+    peek_max_tokens more. Without headroom for this, a probe near the end
+    of a long trace gets silently truncated to 1-2 tokens by vLLM's context
+    limit, producing a spuriously "confident" answer instead of a real one.
+    """
+    max_total_tokens = max(total_token_counts, default=0)
+    required_len = max_total_tokens + peek_max_tokens + 1024
+    return max(required_len, current_max_model_len)
+
+
 def _probe_prompt(base_prompt: str, reasoning_prefix: str) -> str:
     """A raw continuation of the same prompt/reasoning stream, forced to answer now.
 
@@ -59,9 +75,12 @@ def probe_to_checkpoint(
     entropy, margin = entropy_and_margin(first_token_topk_logprobs)
     confidence = deer_confidence(trial_answer_logprobs)
     current_correct = is_correct(trial_answer, ground_truth)
+    # answer_history is the history *before* this checkpoint; make_features'
+    # answer_same_count/answer_changed describe stability up to and including
+    # the current checkpoint, so the current trial_answer must be included.
     features = make_features(
         recent_reasoning_logprobs,
-        answer_history,
+        [*answer_history, trial_answer],
         position,
         deer_confidence_value=confidence,
         entropy=entropy,
@@ -124,7 +143,9 @@ def _analyze_record(
     final_correct = is_correct(full_final_answer, record["ground_truth"])
     for checkpoint in checkpoints:
         checkpoint["final_correct"] = final_correct
-        checkpoint["state"] = classify_state(checkpoint["current_correct"], final_correct)
+        checkpoint["state"] = classify_state(
+            checkpoint["current_correct"], checkpoint["persistent_correct"], final_correct
+        )
 
     return {
         "schema_version": 2,
@@ -168,6 +189,18 @@ def main() -> None:
     from vllm import LLM, SamplingParams
 
     model_config = config["model"]
+    checkpoint_config = config["checkpoint"]
+    required_len = _required_max_model_len(
+        [int(r["total_tokens"]) for r in records],
+        int(checkpoint_config["peek_max_tokens"]),
+        int(model_config["max_model_len"]),
+    )
+    if required_len > int(model_config["max_model_len"]):
+        print(
+            f"Bumping max_model_len {model_config['max_model_len']} -> {required_len} "
+            "so the longest probe prompt fits."
+        )
+        model_config["max_model_len"] = required_len
     llm = LLM(
         model=model_config["generation"],
         dtype=model_config["dtype"],
@@ -177,7 +210,6 @@ def main() -> None:
         seed=int(config["seed"]),
     )
     tokenizer = llm.get_tokenizer()
-    checkpoint_config = config["checkpoint"]
     params = SamplingParams(
         temperature=0.0,
         max_tokens=int(checkpoint_config["peek_max_tokens"]),
