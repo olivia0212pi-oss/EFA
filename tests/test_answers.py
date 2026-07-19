@@ -18,3 +18,8 @@ def test_exact_fallback_correctness() -> None:
     assert is_correct("180", "180")
     assert not is_correct(None, "180")
 
+
+def test_strips_text_wrapper_in_ground_truth() -> None:
+    assert is_correct("Evelyn", r"\text{Evelyn}")
+    assert normalize_answer(r"\text{Evelyn}") == normalize_answer("Evelyn")
+

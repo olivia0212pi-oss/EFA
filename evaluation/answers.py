@@ -38,6 +38,7 @@ def extract_answer(text: str) -> str | None:
 
 def normalize_answer(value: Any) -> str:
     text = str(value).strip()
+    text = re.sub(r"\\(?:text|mathrm|textbf|textit)\{([^{}]*)\}", r"\1", text)
     replacements = {
         "−": "-",
         "–": "-",
