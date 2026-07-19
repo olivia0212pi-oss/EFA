@@ -164,3 +164,35 @@ python -m evaluation.score_results results/math500_smoke.jsonl \
 
 - 需要把 `configs/smoke.yaml` 的 `generation.max_tokens` 调大（例如恢复到与 `base.yaml` 一致的 4096，或先试 2048+ 观察是否够用）后重新跑 5 题冒烟测试，才能做出"人工抽查通过、可以上 100 题"的真实判断。当前不建议在此结果基础上切换到 `configs/math500_100.yaml`。
 - 本次验证结束后已通过 SSH 在实例内执行 `shutdown` 关闭 AutoDL 实例，避免继续计费（模型缓存和数据盘均未删除）。
+
+## 2026-07-20：修复后重跑 5 题冒烟测试 + 发现并修复判分 bug
+
+### 执行记录
+
+同步 `21a2de7`（`max_tokens` 修复）到远程后重跑：
+
+```bash
+python -m generation.generate_dataset --config configs/smoke.yaml
+python -m evaluation.score_results results/math500_smoke.jsonl \
+  --output results/math500_smoke_scored.jsonl
+```
+
+修复后结果：`{"samples": 5, "correct": 3, "accuracy": 0.6, "average_tokens": 2198.4, "average_runtime_seconds": 38.2438}`
+
+### 人工逐题核对
+
+- 4/5 题在 4096 tokens 内正常给出 `\boxed{}` 答案。
+- 1 题（无穷级数求和 `p, q` 相关题）在 4096 tokens 内仍未收敛，模型在做数值逼近验证，`final_answer: null`——这是题目本身思维链更长导致的真实截断，不是判分或配置 bug，5 题样本量下属于正常方差。
+- **发现真实判分 bug**：id=4（"哪位同学平均速度最快"）标准答案是 `\text{Evelyn}`，模型答案是 `Evelyn`，语义完全一致，但被判 `correct: False`。根因是 `evaluation/answers.py` 的 `normalize_answer()` 没有剥离 `\text{}`（以及 `\mathrm{}`/`\textbf{}`/`\textit{}`）包裹，导致字符串比较失败。
+
+### 修复
+
+- `evaluation/answers.py`：在 `normalize_answer` 里加一条正则，先剥离 `\text{...}` 等包裹再做后续归一化。
+- `tests/test_answers.py`：新增回归测试覆盖这个 case。
+- 提交 `76bef9b`，远程同步后 `python -m pytest` 12 项全过。
+- 重新跑评分（无需重新生成）：`{"samples": 5, "correct": 4, "accuracy": 0.8, ...}`，4/5 正确，唯一失败项是上述真实截断题，非 bug。
+
+### 结论
+
+- 判分逻辑目前对 5 题样本可信；`max_tokens: 4096` 大幅减少截断但极端题目（长数值级数题）仍可能不够，进入 100 题阶段后需要持续关注截断率，不需要现在就再调大。
+- 这次修复提醒：进入 100 题人工抽查阶段时要特别留意非数字类（文字/人名/选项字母）答案的判分是否被 `\text{}` 或其他 LaTeX 包裹坑到。
