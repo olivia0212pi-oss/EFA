@@ -18,9 +18,17 @@ def _balanced_braced_span(text: str, open_brace: int) -> tuple[str, int] | None:
 
 
 # Text separating two \boxed{} values that we treat as one chained multi-part
-# answer (e.g. "... are \boxed{-2} and \boxed{1}.") rather than the model
-# re-boxing an unrelated later answer.
+# answer (e.g. "... are \(\boxed{-2}\) and \(\boxed{1}\).") rather than the
+# model re-boxing an unrelated later answer. Inline-math delimiters around
+# each \boxed{} (\(...\), $...$) are stripped before matching.
 _CHAIN_GAP = re.compile(r"^[\s,;:.、和及]{0,20}(?:and|or)?[\s,;:.、和及]{0,20}$", re.IGNORECASE)
+_INLINE_MATH_DELIM = re.compile(r"\\\(|\\\)|\$")
+
+
+def _is_chain_gap(gap: str) -> bool:
+    if len(gap) > 30:
+        return False
+    return bool(_CHAIN_GAP.match(_INLINE_MATH_DELIM.sub("", gap)))
 
 
 def extract_answer(text: str) -> str | None:
@@ -45,7 +53,7 @@ def extract_answer(text: str) -> str | None:
         chain = [matches[-1][0]]
         for i in range(len(matches) - 1, 0, -1):
             gap = text[matches[i - 1][2] : matches[i][1]]
-            if _CHAIN_GAP.match(gap):
+            if _is_chain_gap(gap):
                 chain.append(matches[i - 1][0])
             else:
                 break

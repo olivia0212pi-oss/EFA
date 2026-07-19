@@ -33,6 +33,17 @@ def test_chains_trailing_boxed_values_for_multi_part_answers() -> None:
     assert is_correct(extract_answer(text), "1,-2")
 
 
+def test_chains_boxed_values_wrapped_in_inline_math_delimiters() -> None:
+    # Real model output wraps each \boxed{} in \( \), not just plain text.
+    text = (
+        r"The solutions are \( n = -2 \) and \( n = 1 \). Both satisfy \( f(n) = n \). "
+        r"Thus, the integers \( n \) such that \( f(n) = n \) are "
+        r"\(\boxed{-2}\) and \(\boxed{1}\)."
+    )
+    assert extract_answer(text) == "-2, 1"
+    assert is_correct(extract_answer(text), "1,-2")
+
+
 def test_does_not_chain_unrelated_earlier_guess() -> None:
     text = r"First guess: \boxed{2}. Finally: \boxed{\frac{1}{2}}"
     assert extract_answer(text) == r"\frac{1}{2}"
