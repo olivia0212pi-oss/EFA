@@ -15,6 +15,21 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def score_record(record: dict) -> dict:
+    """Re-derive final_answer from reasoning_text and score it.
+
+    Always re-extracts rather than trusting a cached final_answer, so
+    rescoring an already-generated file picks up extract_answer fixes
+    without needing to regenerate.
+    """
+    reasoning_text = record.get("reasoning_text")
+    prediction = extract_answer(reasoning_text) if reasoning_text else record.get("final_answer")
+    enriched = dict(record)
+    enriched["final_answer"] = prediction
+    enriched["correct"] = is_correct(prediction, record["ground_truth"])
+    return enriched
+
+
 def main() -> None:
     args = parse_args()
     input_path = Path(args.input)
@@ -22,13 +37,7 @@ def main() -> None:
     if not records:
         raise SystemExit(f"No records found in {input_path}")
 
-    scored = []
-    for record in records:
-        prediction = record.get("final_answer") or extract_answer(record["reasoning_text"])
-        enriched = dict(record)
-        enriched["final_answer"] = prediction
-        enriched["correct"] = is_correct(prediction, record["ground_truth"])
-        scored.append(enriched)
+    scored = [score_record(record) for record in records]
 
     correct = sum(bool(record["correct"]) for record in scored)
     total_tokens = sum(int(record.get("total_tokens", 0)) for record in scored)
