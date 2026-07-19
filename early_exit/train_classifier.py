@@ -40,7 +40,7 @@ def main() -> None:
     for record in read_jsonl(args.input):
         for checkpoint in record["checkpoints"]:
             rows.append(feature_vector(checkpoint["features"]))
-            labels.append(int(checkpoint["safe_to_stop"]))
+            labels.append(int(checkpoint["persistent_correct"]))
             groups.append(str(record["sample_id"]))
     if len(set(groups)) < 3 or len(set(labels)) < 2:
         raise SystemExit("Need at least 3 problems and both labels before training.")

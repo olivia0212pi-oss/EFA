@@ -22,6 +22,7 @@ generation:
 checkpoint:
   interval_tokens: 256
   peek_max_tokens: 32
+  probe_top_k: 5
 
 early_exit:
   probability_threshold: 0.9

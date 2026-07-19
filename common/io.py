@@ -31,3 +31,10 @@ def append_jsonl(path: str | Path, record: dict[str, Any]) -> None:
     with output_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
+
+def existing_sample_ids(path: str | Path) -> set[str]:
+    path = Path(path)
+    if not path.exists():
+        return set()
+    return {str(record["sample_id"]) for record in read_jsonl(path)}
+

@@ -15,7 +15,7 @@ def parse_args() -> argparse.Namespace:
 def oracle_for_record(record: dict) -> dict:
     full_tokens = int(record["full_total_tokens"])
     oracle = next(
-        (checkpoint for checkpoint in record["checkpoints"] if checkpoint["safe_to_stop"]),
+        (checkpoint for checkpoint in record["checkpoints"] if checkpoint["persistent_correct"]),
         None,
     )
     stop_token = int(oracle["token"]) if oracle else full_tokens

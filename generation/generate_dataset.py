@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from common.config import load_config
-from common.io import append_jsonl, read_jsonl
+from common.io import append_jsonl, existing_sample_ids, read_jsonl
 from common.reproducibility import set_seed
 from evaluation.answers import extract_answer
 from generation.utils import apply_chat_template, chosen_logprobs, make_math_prompt
@@ -21,13 +21,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--resume", action="store_true", help="Skip sample IDs already present in the output file."
     )
+    parser.add_argument(
+        "--retry-from",
+        help=(
+            "Instead of pulling from the HF dataset, regenerate only the truncated "
+            "(no final \\boxed{} answer) records from this JSONL, reusing their "
+            "question/ground_truth. Never writes back to this file."
+        ),
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        help="Override generation.max_tokens (e.g. for retrying truncations).",
+    )
     return parser.parse_args()
-
-
-def _existing_ids(path: Path) -> set[str]:
-    if not path.exists():
-        return set()
-    return {str(record["sample_id"]) for record in read_jsonl(path)}
 
 
 def _build_record(
@@ -36,9 +43,20 @@ def _build_record(
     output: Any,
     runtime_seconds: float,
     config: dict[str, Any],
+    retry_source: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     model_name = config["model"]["generation"]
     text = output.text
+    metadata = {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "model": model_name,
+        "dataset": config["data"]["dataset"],
+        "split": config["data"]["split"],
+        "seed": config["seed"],
+        "sampling": config["generation"],
+    }
+    if retry_source is not None:
+        metadata["retried_from"] = retry_source
     return {
         "schema_version": 1,
         "sample_id": str(item.get("id", index)),
@@ -50,15 +68,24 @@ def _build_record(
         "token_logprobs": chosen_logprobs(output.token_ids, output.logprobs),
         "total_tokens": len(output.token_ids),
         "runtime_seconds": round(runtime_seconds, 3),
-        "metadata": {
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "model": model_name,
-            "dataset": config["data"]["dataset"],
-            "split": config["data"]["split"],
-            "seed": config["seed"],
-            "sampling": config["generation"],
-        },
+        "metadata": metadata,
     }
+
+
+def _truncated_items(path: str) -> list[dict[str, Any]]:
+    items = []
+    for record in read_jsonl(path):
+        if extract_answer(record["reasoning_text"]) is not None:
+            continue
+        items.append(
+            {
+                "id": record["sample_id"],
+                "problem": record["question"],
+                "answer": record["ground_truth"],
+                "_previous_total_tokens": record["total_tokens"],
+            }
+        )
+    return items
 
 
 def main() -> None:
@@ -66,23 +93,45 @@ def main() -> None:
     config = load_config(args.config)
     if args.num_samples is not None:
         config["data"]["num_samples"] = args.num_samples
+    if args.max_tokens is not None:
+        config["generation"]["max_tokens"] = args.max_tokens
     set_seed(int(config["seed"]))
 
-    from datasets import load_dataset
     from vllm import LLM, SamplingParams
 
-    count = int(config["data"]["num_samples"])
-    default_name = "math500_smoke.jsonl" if count <= 5 else f"math500_{count}.jsonl"
-    output_path = Path(args.output or Path(config["output"]["results_dir"]) / default_name)
+    if args.retry_from:
+        source_path = Path(args.retry_from)
+        default_name = f"{source_path.stem}_retry.jsonl"
+        output_path = Path(args.output or source_path.parent / default_name)
+        if output_path == source_path:
+            raise SystemExit(
+                "--output must differ from --retry-from; refusing to overwrite the source."
+            )
+        dataset = _truncated_items(args.retry_from)
+        if not dataset:
+            raise SystemExit(f"No truncated (unanswered) records found in {args.retry_from}.")
+    else:
+        from datasets import load_dataset
+
+        count = int(config["data"]["num_samples"])
+        default_name = "math500_smoke.jsonl" if count <= 5 else f"math500_{count}.jsonl"
+        output_path = Path(args.output or Path(config["output"]["results_dir"]) / default_name)
+        hf_dataset = load_dataset(config["data"]["dataset"], split=config["data"]["split"])
+        dataset = hf_dataset.select(range(min(count, len(hf_dataset))))
+
     if output_path.exists() and not args.resume:
         raise SystemExit(f"{output_path} already exists. Pass --resume or choose another --output.")
-    completed = _existing_ids(output_path) if args.resume else set()
-
-    dataset = load_dataset(config["data"]["dataset"], split=config["data"]["split"])
-    dataset = dataset.select(range(min(count, len(dataset))))
+    completed = existing_sample_ids(output_path) if args.resume else set()
 
     model_config = config["model"]
     generation_config = config["generation"]
+    required_len = int(generation_config["max_tokens"]) + 1024
+    if required_len > int(model_config["max_model_len"]):
+        print(
+            f"Bumping max_model_len {model_config['max_model_len']} -> {required_len} "
+            "so the prompt plus --max-tokens fits."
+        )
+        model_config["max_model_len"] = required_len
     llm = LLM(
         model=model_config["generation"],
         dtype=model_config["dtype"],
@@ -109,7 +158,12 @@ def main() -> None:
         started = time.perf_counter()
         output = llm.generate([prompt], params, use_tqdm=False)[0].outputs[0]
         runtime = time.perf_counter() - started
-        record = _build_record(item, index, output, runtime, config)
+        retry_source = (
+            {"source": args.retry_from, "previous_total_tokens": item["_previous_total_tokens"]}
+            if args.retry_from
+            else None
+        )
+        record = _build_record(item, index, output, runtime, config, retry_source)
         append_jsonl(output_path, record)
         written += 1
         print(
