@@ -1,0 +1,41 @@
+seed: 42
+
+model:
+  generation: deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
+  sampling: Qwen/Qwen2.5-Math-7B
+  dtype: bfloat16
+  gpu_memory_utilization: 0.88
+  trust_remote_code: false
+
+data:
+  dataset: HuggingFaceH4/MATH-500
+  split: test
+  num_samples: 5
+
+generation:
+  temperature: 0.6
+  top_p: 0.95
+  max_tokens: 4096
+  logprobs: 1
+
+checkpoint:
+  interval_tokens: 256
+  peek_max_tokens: 32
+
+early_exit:
+  probability_threshold: 0.9
+  stable_checkpoints: 3
+
+power_sampling:
+  beta: 2.0
+  proposals: 8
+  max_new_tokens: 128
+  anchor_fraction: 0.5
+  temperature: 0.8
+  min_steps: 2
+  gain_epsilon: 0.01
+
+output:
+  results_dir: results
+  figures_dir: figures
+  checkpoints_dir: checkpoints

@@ -1,0 +1,2 @@
+"""Model generation entry points."""
+

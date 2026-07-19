@@ -1,0 +1,25 @@
+.DS_Store
+.idea/
+.vscode/
+.venv/
+__pycache__/
+*.egg-info/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+
+# Model and dataset caches
+.cache/
+huggingface/
+
+# Experiment artifacts can be large.
+results/*
+!results/.gitkeep
+figures/*
+!figures/.gitkeep
+checkpoints/*
+!checkpoints/.gitkeep
+
+# PDF inspection intermediates
+tmp/

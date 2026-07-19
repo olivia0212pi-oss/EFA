@@ -1,0 +1,17 @@
+# Tested compatibility set for an AutoDL CUDA 12.1 image.
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch==2.5.1+cu121
+vllm==0.7.3
+transformers==4.49.0
+accelerate==1.4.0
+datasets==3.3.2
+math-verify==0.7.0
+numpy==1.26.4
+pandas==2.2.3
+matplotlib==3.9.4
+scikit-learn==1.6.1
+tqdm==4.67.1
+PyYAML==6.0.2
+pytest==8.3.5
+ruff==0.9.10
+-e .

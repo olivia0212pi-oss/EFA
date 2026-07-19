@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "efficient-reasoning-research"
+version = "0.1.0"
+description = "Reproducible experiments for early exit and adaptive power sampling"
+requires-python = ">=3.10,<3.12"
+dependencies = [
+  "PyYAML>=6.0,<7",
+  "numpy>=1.26,<2",
+  "tqdm>=4.66,<5",
+]
+
+[project.scripts]
+efa-check-gpu = "generation.check_gpu:main"
+efa-run-model = "generation.run_model:main"
+efa-generate = "generation.generate_dataset:main"
+efa-score = "evaluation.score_results:main"
+efa-checkpoints = "early_exit.build_checkpoints:main"
+efa-oracle = "early_exit.oracle:main"
+efa-train-exit = "early_exit.train_classifier:main"
+efa-power-sampling = "sampling.power_sampling:main"
+
+[tool.setuptools.packages.find]
+include = ["common*", "generation*", "evaluation*", "early_exit*", "sampling*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
