@@ -5,6 +5,7 @@ model:
   sampling: Qwen/Qwen2.5-Math-7B
   dtype: bfloat16
   gpu_memory_utilization: 0.88
+  max_model_len: 8192
   trust_remote_code: false
 
 data:
