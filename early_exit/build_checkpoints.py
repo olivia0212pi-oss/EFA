@@ -67,14 +67,15 @@ def _analyze_record(
         future_all_correct = future_all_correct and bool(checkpoint["correct"])
         checkpoint["safe_to_stop"] = future_all_correct
 
+    full_final_answer = extract_answer(record["reasoning_text"])
     return {
         "schema_version": 1,
         "sample_id": record["sample_id"],
         "question": record["question"],
         "ground_truth": record["ground_truth"],
         "full_total_tokens": record["total_tokens"],
-        "full_final_answer": record.get("final_answer"),
-        "full_correct": is_correct(record.get("final_answer"), record["ground_truth"]),
+        "full_final_answer": full_final_answer,
+        "full_correct": is_correct(full_final_answer, record["ground_truth"]),
         "checkpoints": checkpoints,
         "metadata": record.get("metadata", {}),
     }
