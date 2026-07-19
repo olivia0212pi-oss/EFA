@@ -134,3 +134,33 @@ python -m evaluation.score_results results/math500_smoke.jsonl \
 ### 4. 使用完毕后关机
 
 模型已经缓存在数据盘，下次开机无需重新下载。不运行实验时应在 AutoDL 控制台关机，避免继续计费；不要删除数据盘或实例中的 `/root/autodl-tmp/huggingface`。
+
+## 2026-07-19（续）：MATH-500 5 题冒烟测试
+
+### 执行记录
+
+远程（AutoDL，代码版本 `4d4bd1a`，已与 GitHub `origin/main` 同步）执行：
+
+```bash
+python -m generation.generate_dataset --config configs/smoke.yaml
+python -m evaluation.score_results results/math500_smoke.jsonl \
+  --output results/math500_smoke_scored.jsonl
+```
+
+生成 5 题总耗时约 79 秒（单题 7.9~17.8 秒）。评分结果：
+
+```json
+{"samples": 5, "correct": 1, "accuracy": 0.2, "average_tokens": 910.0, "average_runtime_seconds": 15.785}
+```
+
+### 人工抽查发现的问题
+
+- 5 题中有 4 题 `total_tokens` 打满 1024 上限，`final_answer` 为 `null`——模型在给出 `\boxed{}` 最终答案之前推理就被截断。
+- 唯一在 454 tokens 内自然结束推理的题目（sample_id=2）正确输出 `\boxed{\dfrac{14}{3}}`，与标准答案 `\frac{14}{3}` 判定为等价，`correct: true`。
+- 根因：`configs/smoke.yaml` 把 `generation.max_tokens` 从 `base.yaml` 的 `4096` 覆盖为 `1024`；DeepSeek-R1-Distill-Qwen-7B 在 MATH 题目上的思维链通常远超 1024 tokens，因此绝大多数题目在完成推理前就被截断。
+- 结论：本次 `accuracy: 0.2` **不代表模型真实能力**，而是评测配置 `max_tokens` 过小导致的截断假阴性。`evaluation.answers`（`extract_answer` / `is_correct`）本身工作正常——sample 2 完整验证了抽取和判分逻辑没问题。
+
+### 待处理
+
+- 需要把 `configs/smoke.yaml` 的 `generation.max_tokens` 调大（例如恢复到与 `base.yaml` 一致的 4096，或先试 2048+ 观察是否够用）后重新跑 5 题冒烟测试，才能做出"人工抽查通过、可以上 100 题"的真实判断。当前不建议在此结果基础上切换到 `configs/math500_100.yaml`。
+- 本次验证结束后已通过 SSH 在实例内执行 `shutdown` 关闭 AutoDL 实例，避免继续计费（模型缓存和数据盘均未删除）。

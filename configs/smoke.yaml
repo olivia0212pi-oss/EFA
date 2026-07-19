@@ -3,6 +3,3 @@ extends: base.yaml
 data:
   num_samples: 5
 
-generation:
-  max_tokens: 1024
-

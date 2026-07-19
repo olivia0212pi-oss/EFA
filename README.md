@@ -10,7 +10,7 @@
 
 ## 当前状态
 
-截至 2026-07-19（AutoDL 服务器时间），项目已经完成首次部署和单题 GPU 冒烟测试。
+截至 2026-07-19（AutoDL 服务器时间），项目已经完成首次部署和单题 GPU 冒烟测试，并已跑过一轮 MATH-500 5 题冒烟测试——**该轮结果暂不可用于判断流程是否通过**，详见下方说明和 [`log.md`](log.md)。
 
 - GitHub 仓库：<https://github.com/olivia0212pi-oss/EFA>
 - 本次已验证代码提交：`65072dd`（`Limit vLLM context length for 24GB GPUs`）
@@ -33,7 +33,9 @@ HF_HOME=/root/autodl-tmp/huggingface
 HF_ENDPOINT=https://hf-mirror.com
 ```
 
-详细部署过程和实测数据见 [`log.md`](log.md)。下一步是生成并评分 5 道 MATH-500：
+详细部署过程和实测数据见 [`log.md`](log.md)。
+
+**已知问题**：已跑过一轮 5 题冒烟测试，`accuracy` 只有 0.2，但根因是 `configs/smoke.yaml` 的 `generation.max_tokens: 1024` 太小——5 题里 4 题在给出 `\boxed{}` 答案前就被截断（`final_answer: null`），并非模型或判分逻辑有问题（唯一跑完的题目判分正确）。下一步需要先调大 `max_tokens`（如恢复到 `base.yaml` 的 4096）重新跑一轮 5 题，人工确认无误后再考虑 100 题：
 
 ```bash
 cd /root/autodl-tmp/EFA
