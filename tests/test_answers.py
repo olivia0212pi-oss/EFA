@@ -60,3 +60,23 @@ def test_bare_fraction_matches_latex_frac() -> None:
     assert normalize_answer(gold) == normalize_answer(pred)
     assert is_correct(pred, gold)
 
+
+def test_strips_latex_control_space_without_fusing_into_next_backslash() -> None:
+    # Real pair from a build_checkpoints smoke run: a naive `\s+` strip only
+    # eats the space in "\ ", leaving a bare backslash that fuses with the
+    # following "\frac" into "\\frac" (two backslashes), which then no
+    # longer matches gold's single-backslash "\frac".
+    pred = r"(\,3,\ \frac{\pi}{2}\,)"
+    gold = r"(3, \dfrac{\pi}{2})"
+    assert normalize_answer(pred) == normalize_answer(gold)
+    assert is_correct(pred, gold)
+
+
+def test_matrix_row_separator_survives_control_space_stripping() -> None:
+    # "\\" between matrix/vector rows is a meaningful separator, not LaTeX
+    # control-space filler, and must not be partially eaten.
+    matrix = r"\begin{pmatrix} 1 \\ 2 \end{pmatrix}"
+    normed = normalize_answer(matrix)
+    assert r"\\" in normed
+    assert normed == r"\begin{pmatrix}1\\2\end{pmatrix}"
+

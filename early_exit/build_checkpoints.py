@@ -55,9 +55,43 @@ def _probe_prompt(base_prompt: str, reasoning_prefix: str) -> str:
     return f"{base_prompt}{reasoning_prefix}\n\nTherefore, the final answer is \\boxed{{"
 
 
+def _first_boxed_close_offset(completion: str) -> int | None:
+    """Character offset within `completion` where the forced \\boxed{ closes.
+
+    The probe prompt always ends in "...\\boxed{", so the completion is
+    everything generated after that opening brace; this walks brace depth
+    from 1 to find where it closes, independent of extract_answer's
+    multi-box chaining (built for the full final trace, not a short forced
+    single-box probe). Returns None if it never closes within the probe's
+    token budget.
+    """
+    depth = 1
+    for index, char in enumerate(completion):
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
+
+
+def _answer_span_token_count(token_texts: list[str], close_offset: int) -> int:
+    """How many leading tokens (by decoded text length) cover the answer
+    content through and including the character at close_offset.
+    """
+    cumulative = 0
+    for count, text in enumerate(token_texts, start=1):
+        cumulative += len(text)
+        if cumulative > close_offset:
+            return count
+    return len(token_texts)
+
+
 def probe_to_checkpoint(
     position: int,
     trial_completion: str,
+    completion_token_texts: list[str],
     trial_answer_logprobs: list[float],
     first_token_topk_logprobs: list[float],
     ground_truth: Any,
@@ -67,14 +101,43 @@ def probe_to_checkpoint(
     """Pure post-processing of one probe's raw generation into a checkpoint record.
 
     Kept free of vLLM types so it is unit-testable without a GPU: callers do
-    the vLLM-specific extraction (chosen_logprobs, output.logprobs[0]) and
-    hand in plain floats/strings.
+    the vLLM-specific extraction (chosen_logprobs, output.logprobs[0],
+    per-token decoded text) and hand in plain floats/strings.
     """
     trial_text = "\\boxed{" + trial_completion
-    trial_answer = extract_answer(trial_text)
+    close_offset = _first_boxed_close_offset(trial_completion)
+    probe_answer_complete = close_offset is not None
+
+    if probe_answer_complete:
+        # The answer is read from the canonical first \boxed{...} span only
+        # (trial_completion[:close_offset]), never from extract_answer on the
+        # full trial_text: that function chains/prefers *later* \boxed{}
+        # occurrences for the real final trace, which would let a second,
+        # possibly-conflicting box the model writes after closing the first
+        # one silently override the label this checkpoint is actually
+        # scored and probed on.
+        trial_answer = trial_completion[:close_offset].strip()
+        span_tokens = _answer_span_token_count(completion_token_texts, close_offset)
+        # Only the tokens that actually form the boxed answer count toward
+        # confidence -- anything the model kept writing after closing the
+        # box (a re-check, a second "Final Answer" restatement, ...) must
+        # not dilute or inflate it.
+        answer_logprobs = trial_answer_logprobs[:span_tokens]
+        confidence: float | None = deer_confidence(answer_logprobs)
+        current_correct = is_correct(trial_answer, ground_truth)
+    else:
+        # The box never closed within the probe's token budget. Force
+        # trial_answer to None here -- not extract_answer's plain-text
+        # fallback on unfinished text -- so a stray answer-shaped phrase in
+        # mid-sentence reasoning can never feed answer_history/features and
+        # fake a stable streak, and this checkpoint never looks like a safe
+        # stop.
+        trial_answer = None
+        answer_logprobs = []
+        confidence = None
+        current_correct = False
+
     entropy, margin = entropy_and_margin(first_token_topk_logprobs)
-    confidence = deer_confidence(trial_answer_logprobs)
-    current_correct = is_correct(trial_answer, ground_truth)
     # answer_history is the history *before* this checkpoint; make_features'
     # answer_same_count/answer_changed describe stability up to and including
     # the current checkpoint, so the current trial_answer must be included.
@@ -82,15 +145,17 @@ def probe_to_checkpoint(
         recent_reasoning_logprobs,
         [*answer_history, trial_answer],
         position,
-        deer_confidence_value=confidence,
+        deer_confidence_value=confidence or 0.0,
         entropy=entropy,
         margin=margin,
+        probe_complete=1.0 if probe_answer_complete else 0.0,
     )
     return {
         "token": position,
         "trial_answer": trial_answer,
         "trial_text": trial_text,
-        "trial_answer_logprobs": trial_answer_logprobs,
+        "probe_answer_complete": probe_answer_complete,
+        "trial_answer_logprobs": answer_logprobs,
         "current_correct": current_correct,
         "deer_confidence": confidence,
         "top_logprobs": first_token_topk_logprobs,
@@ -98,6 +163,22 @@ def probe_to_checkpoint(
         "margin": margin,
         "features": features,
     }
+
+
+def _cumulative_token_texts(tokenizer: Any, token_ids: list[int]) -> list[str]:
+    """Per-token decoded text pieces via cumulative-decode diffs.
+
+    Decoding each token id in isolation can misplace merge/whitespace
+    artifacts for some tokenizers; diffing successive cumulative decodes
+    keeps each piece aligned with where it actually lands in the full text.
+    """
+    texts = []
+    previous = ""
+    for i in range(1, len(token_ids) + 1):
+        current = tokenizer.decode(token_ids[:i], skip_special_tokens=True)
+        texts.append(current[len(previous) :])
+        previous = current
+    return texts
 
 
 def _analyze_record(
@@ -116,6 +197,7 @@ def _analyze_record(
         prompt = _probe_prompt(base_prompt, prefix)
         output = llm.generate([prompt], params, use_tqdm=False)[0].outputs[0]
         trial_answer_logprobs = chosen_logprobs(output.token_ids, output.logprobs)
+        completion_token_texts = _cumulative_token_texts(tokenizer, list(output.token_ids))
         first_token_topk = (
             sorted((float(c.logprob) for c in output.logprobs[0].values()), reverse=True)
             if output.logprobs
@@ -125,6 +207,7 @@ def _analyze_record(
         checkpoint = probe_to_checkpoint(
             position,
             output.text,
+            completion_token_texts,
             trial_answer_logprobs,
             first_token_topk,
             record["ground_truth"],
@@ -148,7 +231,7 @@ def _analyze_record(
         )
 
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "sample_id": record["sample_id"],
         "question": record["question"],
         "ground_truth": record["ground_truth"],

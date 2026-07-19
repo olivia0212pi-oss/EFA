@@ -13,6 +13,7 @@ FEATURE_NAMES = [
     "deer_confidence",
     "entropy",
     "margin",
+    "probe_complete",
 ]
 
 STATE_CORRECT_STABLE = "correct_stable"
@@ -100,6 +101,7 @@ def make_features(
     deer_confidence_value: float = 0.0,
     entropy: float = 0.0,
     margin: float = 0.0,
+    probe_complete: float = 1.0,
 ) -> dict[str, float]:
     finite = np.asarray(logprobs_recent, dtype=float)
     finite = finite[np.isfinite(finite)]
@@ -114,6 +116,7 @@ def make_features(
         "deer_confidence": float(deer_confidence_value),
         "entropy": float(entropy),
         "margin": float(margin),
+        "probe_complete": float(probe_complete),
     }
 
 

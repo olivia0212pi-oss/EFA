@@ -1,7 +1,9 @@
 import pytest
 
 from early_exit.build_checkpoints import (
+    _answer_span_token_count,
     _checkpoint_positions,
+    _first_boxed_close_offset,
     _probe_prompt,
     _required_max_model_len,
     probe_to_checkpoint,
@@ -71,7 +73,9 @@ def test_classify_state_uses_persistent_correct_not_final_correct() -> None:
 def test_required_max_model_len_grows_for_the_longest_record() -> None:
     # A record with 8034 tokens plus a 32-token peek plus buffer exceeds the
     # current 8192 max_model_len, so it must grow.
-    grown = _required_max_model_len([1200, 8034, 3000], peek_max_tokens=32, current_max_model_len=8192)
+    grown = _required_max_model_len(
+        [1200, 8034, 3000], peek_max_tokens=32, current_max_model_len=8192
+    )
     assert grown == 8034 + 32 + 1024
     # Already-sufficient max_model_len is left untouched (never shrinks).
     unchanged = _required_max_model_len([100, 200], peek_max_tokens=32, current_max_model_len=8192)
@@ -90,12 +94,26 @@ def test_probe_prompt_is_raw_continuation_not_a_new_turn() -> None:
     assert prompt.rstrip().endswith("\\boxed{")
 
 
+def test_first_boxed_close_offset_finds_the_matching_brace() -> None:
+    assert _first_boxed_close_offset("17}. Done.") == 2
+    assert _first_boxed_close_offset("\\frac{1}{2}}. Done.") == 11
+    assert _first_boxed_close_offset("still thinking, ran out of budget") is None
+
+
+def test_answer_span_token_count_stops_at_close_offset() -> None:
+    # "17" (len 2, cumulative 2, not > close_offset=2) then "}" (cumulative
+    # 3 > 2) -> both tokens are needed to cover through the closing brace.
+    assert _answer_span_token_count(["17", "}", ".", " Done", "."], close_offset=2) == 2
+    assert _answer_span_token_count(["a", "b", "c"], close_offset=100) == 3
+
+
 def test_probe_to_checkpoint_builds_full_schema() -> None:
     import math
 
     checkpoint = probe_to_checkpoint(
         position=256,
-        trial_completion="17}. Done.",
+        trial_completion="17}",
+        completion_token_texts=["17", "}"],
         trial_answer_logprobs=[math.log(0.9), math.log(0.95)],
         first_token_topk_logprobs=[math.log(0.9), math.log(0.05)],
         ground_truth="17",
@@ -104,13 +122,15 @@ def test_probe_to_checkpoint_builds_full_schema() -> None:
     )
     assert checkpoint["token"] == 256
     assert checkpoint["trial_answer"] == "17"
-    assert checkpoint["trial_text"] == "\\boxed{17}. Done."
+    assert checkpoint["trial_text"] == "\\boxed{17}"
+    assert checkpoint["probe_answer_complete"] is True
     assert checkpoint["current_correct"] is True
     expected_confidence = math.exp((math.log(0.9) + math.log(0.95)) / 2)
     assert checkpoint["deer_confidence"] == pytest.approx(expected_confidence)
     assert checkpoint["entropy"] > 0
     assert checkpoint["margin"] > 0
     assert checkpoint["features"]["deer_confidence"] == checkpoint["deer_confidence"]
+    assert checkpoint["features"]["probe_complete"] == 1.0
     # persistent_correct/final_correct/state are filled in by _analyze_record's
     # record-level pass, not by this per-probe helper.
     assert "persistent_correct" not in checkpoint
@@ -123,8 +143,9 @@ def test_probe_to_checkpoint_includes_current_answer_in_stability_features() -> 
     # answer_same_count/answer_changed, not left out (off-by-one).
     checkpoint = probe_to_checkpoint(
         position=768,
-        trial_completion="17}.",
-        trial_answer_logprobs=[0.0],
+        trial_completion="17}",
+        completion_token_texts=["17", "}"],
+        trial_answer_logprobs=[0.0, 0.0],
         first_token_topk_logprobs=[0.0],
         ground_truth="17",
         recent_reasoning_logprobs=[-0.1],
@@ -133,6 +154,94 @@ def test_probe_to_checkpoint_includes_current_answer_in_stability_features() -> 
     # Including this checkpoint's own "17", that's three in a row.
     assert checkpoint["features"]["answer_same_count"] == 3.0
     assert checkpoint["features"]["answer_changed"] == 0.0
+
+
+def test_deer_confidence_ignores_tokens_after_boxed_closes() -> None:
+    # The model closes \boxed{17} after 2 tokens, then keeps writing a
+    # trailing re-check with wildly different (fake) logprobs. Those
+    # trailing tokens must not move deer_confidence at all.
+    completion = "17}. Wait, let me double check that."
+    token_texts = ["17", "}", ".", " Wait", ",", " let", " me", " double", " check", " that", "."]
+    assert sum(len(t) for t in token_texts) == len(completion)
+
+    answer_logprobs = [-0.01, -0.02]
+    trailing_high = answer_logprobs + [-0.0001] * (len(token_texts) - 2)
+    trailing_low = answer_logprobs + [-50.0] * (len(token_texts) - 2)
+
+    checkpoint_a = probe_to_checkpoint(
+        position=256,
+        trial_completion=completion,
+        completion_token_texts=token_texts,
+        trial_answer_logprobs=trailing_high,
+        first_token_topk_logprobs=[0.0],
+        ground_truth="17",
+        recent_reasoning_logprobs=[],
+        answer_history=[],
+    )
+    checkpoint_b = probe_to_checkpoint(
+        position=256,
+        trial_completion=completion,
+        completion_token_texts=token_texts,
+        trial_answer_logprobs=trailing_low,
+        first_token_topk_logprobs=[0.0],
+        ground_truth="17",
+        recent_reasoning_logprobs=[],
+        answer_history=[],
+    )
+    assert checkpoint_a["probe_answer_complete"] is True
+    assert checkpoint_a["trial_answer_logprobs"] == answer_logprobs
+    assert checkpoint_a["deer_confidence"] == pytest.approx(checkpoint_b["deer_confidence"])
+
+
+def test_probe_to_checkpoint_ignores_a_conflicting_second_boxed_answer() -> None:
+    # Nested LaTeX in the first (canonical) box, then the model rewrites a
+    # *different* second \boxed{} later in the same capped completion.
+    # trial_answer/current_correct must come from the first span only --
+    # extract_answer()'s chaining (built for the real final trace) would
+    # otherwise prefer the later, conflicting box and silently relabel this
+    # checkpoint.
+    completion = "\\frac{1}{2}}. Hmm wait, recompute: \\boxed{99}."
+    close = _first_boxed_close_offset(completion)
+    assert close == 11  # end of "\frac{1}{2}", matching the nested-brace unit test above
+    token_texts = list(completion)  # one char per token keeps span slicing trivial to reason about
+    logprobs = [-0.1] * len(token_texts)
+
+    checkpoint = probe_to_checkpoint(
+        position=256,
+        trial_completion=completion,
+        completion_token_texts=token_texts,
+        trial_answer_logprobs=logprobs,
+        first_token_topk_logprobs=[0.0],
+        ground_truth="\\frac{1}{2}",
+        recent_reasoning_logprobs=[],
+        answer_history=[],
+    )
+    assert checkpoint["probe_answer_complete"] is True
+    assert checkpoint["trial_answer"] == "\\frac{1}{2}"
+    assert checkpoint["current_correct"] is True
+    # Would be wrong (99) if trial_answer had come from extract_answer()'s
+    # chained/last-box view of the full trial_text instead of the first span.
+    assert checkpoint["trial_answer"] != "99"
+
+
+def test_probe_to_checkpoint_marks_incomplete_probe_non_stoppable() -> None:
+    checkpoint = probe_to_checkpoint(
+        position=256,
+        trial_completion="still thinking about it and ran out of budget",
+        completion_token_texts=["still", " thinking", " ...", " ran out"],
+        trial_answer_logprobs=[-0.1, -0.1, -0.1, -0.1],
+        first_token_topk_logprobs=[0.0],
+        ground_truth="17",
+        recent_reasoning_logprobs=[],
+        answer_history=["17"],
+    )
+    assert checkpoint["probe_answer_complete"] is False
+    assert checkpoint["trial_answer"] is None
+    assert checkpoint["deer_confidence"] is None
+    assert checkpoint["trial_answer_logprobs"] == []
+    # Never a safe stop, regardless of whatever a fallback text match found.
+    assert checkpoint["current_correct"] is False
+    assert checkpoint["features"]["probe_complete"] == 0.0
 
 
 def test_oracle_uses_first_permanently_correct_checkpoint() -> None:

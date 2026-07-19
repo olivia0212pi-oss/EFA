@@ -102,6 +102,13 @@ def normalize_answer(value: Any) -> str:
     text = str(value).strip()
     text = re.sub(r"\\(?:text|mathrm|textbf|textit)\{([^{}]*)\}", r"\1", text)
     text = re.sub(r"(-?)(\d+)/(-?)(\d+)", _bare_fraction_to_latex, text)
+    # LaTeX control space ("\ " / "\<tab>") is pure spacing and should
+    # vanish like "\,", but a bare `\s+` strip only eats the space and
+    # leaves the backslash to fuse with whatever follows (e.g. "\ \frac"
+    # -> "\\frac", two backslashes, no longer matching "\frac"). Only strip
+    # it when the backslash isn't itself the second half of a "\\" pair,
+    # which is a meaningful matrix/vector row separator that must survive.
+    text = re.sub(r"(?<!\\)\\[ \t]", "", text)
     replacements = {
         "−": "-",
         "–": "-",
