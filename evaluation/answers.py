@@ -92,9 +92,16 @@ def _split_top_level(value: str) -> list[str]:
     return [part for part in parts if part]
 
 
+def _bare_fraction_to_latex(match: re.Match[str]) -> str:
+    num_sign, num, den_sign, den = match.groups()
+    negative = (num_sign == "-") != (den_sign == "-")
+    return f"{'-' if negative else ''}\\frac{{{num}}}{{{den}}}"
+
+
 def normalize_answer(value: Any) -> str:
     text = str(value).strip()
     text = re.sub(r"\\(?:text|mathrm|textbf|textit)\{([^{}]*)\}", r"\1", text)
+    text = re.sub(r"(-?)(\d+)/(-?)(\d+)", _bare_fraction_to_latex, text)
     replacements = {
         "−": "-",
         "–": "-",

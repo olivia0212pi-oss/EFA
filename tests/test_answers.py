@@ -53,3 +53,10 @@ def test_single_value_answer_unaffected_by_multi_value_path() -> None:
     assert is_correct("42", "42")
     assert not is_correct("41", "42")
 
+
+def test_bare_fraction_matches_latex_frac() -> None:
+    gold = r"\begin{pmatrix} -1/3 \\ 2/3 \\ 5/3 \end{pmatrix}"
+    pred = r"\begin{pmatrix} -\dfrac{1}{3} \\ \dfrac{2}{3} \\ \dfrac{5}{3} \end{pmatrix}"
+    assert normalize_answer(gold) == normalize_answer(pred)
+    assert is_correct(pred, gold)
+
