@@ -4,7 +4,7 @@ import re
 from typing import Any
 
 
-def _balanced_braced_value(text: str, open_brace: int) -> str | None:
+def _balanced_braced_span(text: str, open_brace: int) -> tuple[str, int] | None:
     depth = 0
     for index in range(open_brace, len(text)):
         char = text[index]
@@ -13,18 +13,44 @@ def _balanced_braced_value(text: str, open_brace: int) -> str | None:
         elif char == "}":
             depth -= 1
             if depth == 0:
-                return text[open_brace + 1 : index].strip()
+                return text[open_brace + 1 : index].strip(), index + 1
     return None
 
 
+# Text separating two \boxed{} values that we treat as one chained multi-part
+# answer (e.g. "... are \boxed{-2} and \boxed{1}.") rather than the model
+# re-boxing an unrelated later answer.
+_CHAIN_GAP = re.compile(r"^[\s,;:.、和及]{0,20}(?:and|or)?[\s,;:.、和及]{0,20}$", re.IGNORECASE)
+
+
 def extract_answer(text: str) -> str | None:
-    """Extract the final boxed value, including nested LaTeX braces."""
-    positions = [match.start() for match in re.finditer(r"\\boxed\s*\{", text)]
-    for position in reversed(positions):
+    """Extract the final boxed value(s), including nested LaTeX braces.
+
+    Multiple questions in MATH-500 ask for several values (e.g. "enter all
+    such integers, separated by commas"), and models often answer with a
+    chain of separate \\boxed{} at the very end instead of one combined
+    box. Trailing boxed values joined only by short connector text (",",
+    "and", ...) are chained together; earlier, unrelated \\boxed{} (e.g.
+    an abandoned intermediate guess) are still ignored as before.
+    """
+    matches: list[tuple[str, int, int]] = []  # (value, start, end)
+    for position in [m.start() for m in re.finditer(r"\\boxed\s*\{", text)]:
         open_brace = text.find("{", position)
-        value = _balanced_braced_value(text, open_brace)
-        if value is not None:
-            return value
+        span = _balanced_braced_span(text, open_brace)
+        if span is not None:
+            value, end = span
+            matches.append((value, position, end))
+
+    if matches:
+        chain = [matches[-1][0]]
+        for i in range(len(matches) - 1, 0, -1):
+            gap = text[matches[i - 1][2] : matches[i][1]]
+            if _CHAIN_GAP.match(gap):
+                chain.append(matches[i - 1][0])
+            else:
+                break
+        chain.reverse()
+        return ", ".join(chain)
 
     final_match = re.search(
         r"(?:final answer|answer is|答案(?:是|为))\s*[:：]?\s*([^\n]+)",
@@ -34,6 +60,28 @@ def extract_answer(text: str) -> str | None:
     if final_match:
         return final_match.group(1).strip().rstrip("。.")
     return None
+
+
+def _split_top_level(value: str) -> list[str]:
+    """Split on commas that are not nested inside brackets/braces/parens."""
+    parts = []
+    depth = 0
+    current: list[str] = []
+    for char in value:
+        if char in "{[(":
+            depth += 1
+            current.append(char)
+        elif char in "}])":
+            depth -= 1
+            current.append(char)
+        elif char == "," and depth == 0:
+            parts.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+    if current:
+        parts.append("".join(current).strip())
+    return [part for part in parts if part]
 
 
 def normalize_answer(value: Any) -> str:
@@ -58,6 +106,15 @@ def normalize_answer(value: Any) -> str:
 def is_correct(prediction: str | None, gold: Any) -> bool:
     if prediction is None:
         return False
+
+    gold_parts = _split_top_level(str(gold))
+    if len(gold_parts) > 1:
+        pred_parts = _split_top_level(prediction)
+        gold_set = {normalize_answer(part) for part in gold_parts}
+        pred_set = {normalize_answer(part) for part in pred_parts}
+        if gold_set == pred_set:
+            return True
+
     try:
         from math_verify import parse, verify
 
