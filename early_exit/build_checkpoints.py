@@ -97,6 +97,7 @@ def probe_to_checkpoint(
     ground_truth: Any,
     recent_reasoning_logprobs: list[float],
     answer_history: list[str | None],
+    probe_generated_tokens: int,
 ) -> dict[str, Any]:
     """Pure post-processing of one probe's raw generation into a checkpoint record.
 
@@ -125,6 +126,7 @@ def probe_to_checkpoint(
         answer_logprobs = trial_answer_logprobs[:span_tokens]
         confidence: float | None = deer_confidence(answer_logprobs)
         current_correct = is_correct(trial_answer, ground_truth)
+        probe_answer_span_tokens = span_tokens
     else:
         # The box never closed within the probe's token budget. Force
         # trial_answer to None here -- not extract_answer's plain-text
@@ -136,6 +138,7 @@ def probe_to_checkpoint(
         answer_logprobs = []
         confidence = None
         current_correct = False
+        probe_answer_span_tokens = 0
 
     entropy, margin = entropy_and_margin(first_token_topk_logprobs)
     # answer_history is the history *before* this checkpoint; make_features'
@@ -156,6 +159,16 @@ def probe_to_checkpoint(
         "trial_text": trial_text,
         "probe_answer_complete": probe_answer_complete,
         "trial_answer_logprobs": answer_logprobs,
+        # True cost of this probe call (vLLM generated this many tokens
+        # regardless of where/whether the box closed) vs. the (possibly much
+        # shorter, possibly zero for an incomplete probe) span actually used
+        # for the confidence signal. Token-savings accounting must subtract
+        # probe_generated_tokens, not len(trial_answer_logprobs) -- the
+        # latter undercounts real generation cost, especially for
+        # incomplete probes where it's 0 even though the model still
+        # generated up to the full probe budget trying to close the box.
+        "probe_generated_tokens": probe_generated_tokens,
+        "probe_answer_span_tokens": probe_answer_span_tokens,
         "current_correct": current_correct,
         "deer_confidence": confidence,
         "top_logprobs": first_token_topk_logprobs,
@@ -213,6 +226,7 @@ def _analyze_record(
             record["ground_truth"],
             recent,
             answer_history,
+            len(output.token_ids),
         )
         answer_history.append(checkpoint["trial_answer"])
         checkpoints.append(checkpoint)
@@ -231,7 +245,7 @@ def _analyze_record(
         )
 
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "sample_id": record["sample_id"],
         "question": record["question"],
         "ground_truth": record["ground_truth"],

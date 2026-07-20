@@ -35,7 +35,8 @@ import json
 import math
 import random
 import statistics
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 from sklearn.linear_model import LogisticRegression
@@ -149,7 +150,7 @@ def augment_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for r in records:
         temporal = causal_temporal_features(r["checkpoints"])
         new_checkpoints = []
-        for cp, temp in zip(r["checkpoints"], temporal):
+        for cp, temp in zip(r["checkpoints"], temporal, strict=True):
             # cp["features"] already has safe (0.0-substituted) values for
             # incomplete probes plus probe_complete; don't overwrite with the
             # raw (possibly None) top-level fields.
@@ -179,6 +180,19 @@ def feature_vector_for(cp: dict[str, Any], names: list[str]) -> list[float]:
 
 
 def probe_token_cost(cp: dict[str, Any]) -> int:
+    """True generated-token cost of one probe call.
+
+    Prefers probe_generated_tokens (schema_version >= 4: the real
+    len(output.token_ids) from vLLM). The checkpoints_math500_93_v3.jsonl
+    data this script currently reads predates that field, so it falls back
+    to len(trial_answer_logprobs) -- which UNDERCOUNTS real cost, since it's
+    only the (possibly much shorter, possibly zero for an incomplete probe)
+    span used for the confidence signal, not what was actually generated.
+    All "saved_net_of_probe_cost" numbers from this fallback path are a
+    floor, not the true net savings; see LIMITATIONS in the printed report.
+    """
+    if "probe_generated_tokens" in cp:
+        return int(cp["probe_generated_tokens"])
     return len(cp.get("trial_answer_logprobs") or [])
 
 
@@ -281,7 +295,6 @@ def run_nested_cv(
             continue
         splitter = GroupShuffleSplit(n_splits=1, test_size=0.25, random_state=SEED)
         fit_idx, calib_idx = next(splitter.split(x, y, groups=inner_groups))
-        fit_ids = {inner_groups[i] for i in fit_idx}
         calib_ids = {inner_groups[i] for i in calib_idx}
 
         model = make_pipeline(
@@ -329,7 +342,11 @@ def metrics(oof: list[dict[str, Any]]) -> dict[str, float]:
 
 def print_row(label: str, m: dict[str, float]) -> None:
     err = "n/a" if math.isnan(m["stop_error"]) else f"{m['stop_error']:.4f}"
-    ci = "" if math.isnan(m["stop_error"]) else f" CI[{m['stop_error_ci_lo']:.4f},{m['stop_error_ci_hi']:.4f}]"
+    ci = (
+        ""
+        if math.isnan(m["stop_error"])
+        else f" CI[{m['stop_error_ci_lo']:.4f},{m['stop_error_ci_hi']:.4f}]"
+    )
     print(
         f"  {label:34s} acc={m['accuracy']:.4f} stop_rate={m['stop_rate']:.4f} "
         f"stop_error={err}{ci} saved_naive={m['micro_saved_naive']:.4f} "
@@ -347,22 +364,17 @@ def paired_bootstrap_delta(
     ids = sorted(set(by_id_a) & set(by_id_b), key=int)
     rng = random.Random(SEED)
 
+    def saved_fraction(s: dict[str, Any]) -> float:
+        if not s["full_tokens"]:
+            return 0.0
+        return max(0, s["full_tokens"] - s["stop_token"]) / s["full_tokens"]
+
     def scalar_metrics(subset_ids: list[str]) -> dict[str, float]:
         a = [by_id_a[i] for i in subset_ids]
         b = [by_id_b[i] for i in subset_ids]
         return {
-            "saved_fraction": statistics.mean(
-                [
-                    max(0, s["full_tokens"] - s["stop_token"]) / s["full_tokens"] if s["full_tokens"] else 0.0
-                    for s in b
-                ]
-            )
-            - statistics.mean(
-                [
-                    max(0, s["full_tokens"] - s["stop_token"]) / s["full_tokens"] if s["full_tokens"] else 0.0
-                    for s in a
-                ]
-            ),
+            "saved_fraction": statistics.mean(saved_fraction(s) for s in b)
+            - statistics.mean(saved_fraction(s) for s in a),
             "accuracy": statistics.mean([1.0 if s["correct"] else 0.0 for s in b])
             - statistics.mean([1.0 if s["correct"] else 0.0 for s in a]),
         }
@@ -388,7 +400,10 @@ def main() -> None:
     groups = [r["sample_id"] for r in records]
 
     print("=" * 78)
-    print(f"Day 4.6: causal temporal-dynamics features, N={len(records)}, {N_OUTER_FOLDS}-fold grouped CV")
+    print(
+        f"Day 4.6: causal temporal-dynamics features, N={len(records)}, "
+        f"{N_OUTER_FOLDS}-fold grouped CV"
+    )
     print("=" * 78)
     print()
     print("M0 =", M0_FEATURES)
@@ -400,13 +415,20 @@ def main() -> None:
     print(f"PRIMARY COMPARISON at target_error={PRIMARY_TARGET_ERROR} (matches day45 protocol)")
     print("-" * 78)
     oof = {}
-    for label, feats in [("M0[confidence-only]", M0_FEATURES), ("M1[pointwise]", M1_FEATURES), ("M2[pointwise+temporal]", M2_FEATURES)]:
+    feature_sets = [
+        ("M0[confidence-only]", M0_FEATURES),
+        ("M1[pointwise]", M1_FEATURES),
+        ("M2[pointwise+temporal]", M2_FEATURES),
+    ]
+    for label, feats in feature_sets:
         oof[label] = run_nested_cv(records, groups, feats, PRIMARY_TARGET_ERROR)
         print_row(label, metrics(oof[label]))
     print()
 
     print("-" * 78)
-    print("MATCHED-RISK SWEEP (same target_error across M0/M1/M2, not a single point)")
+    print("TARGET-MATCHED SWEEP (same calibration TARGET across M0/M1/M2 -- the")
+    print("realized stop_error below still differs per method/fold; read the actual")
+    print("numbers, this is not a true matched-realized-risk comparison)")
     print("-" * 78)
     for target in RISK_SWEEP:
         print(f"target_error={target}:")
@@ -416,7 +438,14 @@ def main() -> None:
     print()
 
     print("-" * 78)
-    print(f"PAIRED BOOTSTRAP, M2 - M1, target_error={PRIMARY_TARGET_ERROR}, {N_BOOTSTRAP} resamples, paired by sample_id")
+    print(
+        f"PAIRED BOOTSTRAP (LOWER BOUND ON UNCERTAINTY), M2 - M1, "
+        f"target_error={PRIMARY_TARGET_ERROR}, {N_BOOTSTRAP} resamples, paired by sample_id"
+    )
+    print("This resamples the fixed OOF outcomes from ONE nested-CV run; it captures")
+    print("sampling variance in which problems you'd get, but NOT refit/recalibration")
+    print("variance (a different problem sample would also fit a different model and")
+    print("threshold). True uncertainty is wider than the interval below.")
     print("-" * 78)
     deltas = paired_bootstrap_delta(oof["M1[pointwise]"], oof["M2[pointwise+temporal]"])
     for name, (point, lo, hi) in deltas.items():

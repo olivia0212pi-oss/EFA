@@ -9,7 +9,8 @@ from __future__ import annotations
 import json
 import math
 import statistics
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 from sklearn.linear_model import LogisticRegression
@@ -147,7 +148,6 @@ def run_nested_cv_for_feature_set(
             continue
         splitter = GroupShuffleSplit(n_splits=1, test_size=0.25, random_state=SEED)
         fit_idx, calib_idx = next(splitter.split(x, y, groups=inner_groups))
-        fit_ids = {inner_groups[i] for i in fit_idx}
         calib_ids = {inner_groups[i] for i in calib_idx}
 
         model = make_pipeline(

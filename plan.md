@@ -24,9 +24,29 @@
 - [x] **Day 2**：100 题生成 + 评分完成，`accuracy: 0.77`（77/100）。审计发现并修复第二个判分 bug（裸分数 `a/b` vs `\frac{a}{b}` 不匹配，`8b6e119`）。23 道错题中 22 道是 4096-token 真实截断、1 道模型真答错，无遗留判分 bug。
 - [x] **Day 3**：22 道截断题用 `max_tokens=8192` 重试，15 道恢复、7 道确认真实超长截断并排除。`early_exit.build_checkpoints` 重写为 DEER 风格真实探测（审计出并修复 4 类真实 bug：状态误标注、特征 off-by-one、探测长度截断、置信度被闭合后文字稀释）。93 题、958 个 checkpoint 全量审计通过。Oracle 理论上限：79.57% 题目有安全停止点，平均能省 45.26% token，正确率保持 98.92%。
 - [x] **Day 4/5（合并完成）**：`scripts/day45_rigorous_eval.py` 用分组 5 折嵌套交叉验证，同一套流程评估了早停分类器 + 手册 4.7 全部 4 个基线方法（confidence-only/entropy-only/answer-stable-3x/fixed-token）。**诚实结论**：分类器真实停错率 11.27%（95% CI [5.82%, 20.69%]），没达到 5% 目标，也没跑赢最简单的 entropy-only 基线（6.25%）。这是严格评估暴露的真实小样本局限，不是 bug，可以作为论文的诚实发现之一，但也说明可能需要扩大样本（100→500 题）或更谨慎的正则化。详见 `log.md`。
-- [x] **Day 6 → Day 4.6**：原定"扩大样本 vs 接受发现"二选一之前，先补了一步关键的方法学修正——之前的"历史特征"（`answer_same_count`/`answer_changed`/`reasoning_length`）根本不是置信度时序动态，只是答案稳定性的弱代理，"历史没帮助"这个结论不成立。`scripts/day46_temporal_features.py` 用真正的因果时序特征（confidence delta/斜率/骤降/entropy 斜率/累计变化次数等）重新对比 M0(纯置信度)/M1(单点快照)/M2(快照+时序)，配对 bootstrap 显示 M2 比 M1 多省 2.68 个百分点 token（95% CI [0.30%, 5.22%] 不含 0，真实增益），但最严格的 5% 停错目标下纯置信度 M0 仍略微更安全（10.13% vs M2 的 11.27%）。详见 `log.md`。
-- [ ] **Day 7**：AIME 或 GPQA 上做分类器迁移测试（不重训）。**需要先重新开机 AutoDL 实例**（当前已关机，需要用户提供新一轮 SSH 登录信息，端口/密码每次开机都会变）。
-- [ ] **Day 8**：oracle 差距归因分析 + 关键图（x=平均 token，y=正确率），把 Day 3 的 oracle 数字和 Day 4/5 的分类器结果接起来分析差距来源。
+- [x] **Day 6 → Day 4.6**：原定"扩大样本 vs 接受发现"二选一之前，先补了一步关键的方法学修正——之前的"历史特征"（`answer_same_count`/`answer_changed`/`reasoning_length`）根本不是置信度时序动态，只是答案稳定性的弱代理，"历史没帮助"这个结论不成立。`scripts/day46_temporal_features.py` 用真正的因果时序特征（confidence delta/斜率/骤降/entropy 斜率/累计变化次数等）重新对比 M0(纯置信度)/M1(单点快照)/M2(快照+时序)。**这是开发集上的探索性证据，不是已证实结论**——用户复核后指出交叉验证防泄漏但不能替代独立新数据、"同目标"不等于"同实测风险"、准确率差值置信区间双向、探测开销此前被低估。详见 `log.md` 的完整修正说明。
+- [x] **Day 6.5（协议修复）**：`early_exit/build_checkpoints.py` 新增 `probe_generated_tokens`/`probe_answer_span_tokens` 字段（`schema_version`→4），修复探测开销记账低估问题；`day46_temporal_features.py` 的对比标注改为诚实描述（"target-matched"非"matched-risk"、bootstrap 标注为不确定性下界）。
+
+## 冻结协议（扩样本到约 300 题之前锁定，不得依据新数据结果再改）
+
+当前 93 题是**开发集**（特征假设和设计在这批数据上产生），即将新增约 200 题作为**独立确认集**，最终目标扩到约 300 题，之后才去 AIME 做跨 benchmark 泛化。核心待回答问题：**在没参与过特征设计的新题上，M2 是否仍能在相近实际停错率下，比 M1 省更多 token？**
+
+冻结项（新数据结果出来后不得因为"想要更好看的数字"而回头改）：
+
+- 特征集定义：M0=`[deer_confidence]`；M1=`[deer_confidence, entropy, margin, avg_logprob, min_logprob, reasoning_length, probe_complete]`；M2=M1+`[confidence_delta, confidence_slope3, confidence_std3, confidence_max_drop, entropy_slope3, answer_streak, answer_change_count, confidence_answer_conflict]`，全部时序特征只用因果（当前及之前检查点）计算。
+- 模型与超参：`sklearn.LogisticRegression(max_iter=1000, class_weight="balanced", random_state=42)` + `StandardScaler`，正则化用默认 `C=1.0`（未调过，冻结为默认值）。
+- checkpoint 间隔 256 tokens、探测上限 32 tokens（`configs/base.yaml`）。
+- 阈值校准协议：外层分组 5 折（`GroupKFold`），内层 75/25 fit/calibration 切分（`GroupShuffleSplit(random_state=42)`），calibration 集上取满足 `stop_error≤target` 的最宽松阈值。
+- 主要指标：`target_error=0.05` 的 accuracy/stop_rate/stop_error(95% Wilson CI)/micro_saved_naive/micro_saved_net_of_probe_cost，辅以 `{0.03, 0.05, 0.10, 0.15}` 扫描。
+- **新采集的确认集必须用 `schema_version=4` 的 `build_checkpoints.py` 生成**（带真实 `probe_generated_tokens` 记账），不能拼接旧的 v3 数据一起分析。
+- 不得因为看到confirmation 集结果不理想就调整特征/超参/阈值方法再重跑——如果 M2 相对 M1 的增益在新数据上消失或反向，如实记录为负结果。
+
+## 下一步
+
+- [ ] **扩样本**：生成约 200 道新的 MATH-500 题目（避开当前 93+7 已用过的 id），走完整流程（生成→评分→重试截断→build_checkpoints v4→接到已有 93 题合并成约 300 题confirmation 分析）。**需要先重新开机 AutoDL 实例**（当前已关机，需要用户提供新一轮 SSH 登录信息，端口/密码每次开机都会变）。**在拿到用户的开机信息前不得操作 GPU/AutoDL**。
+- [ ] 在冻结协议下跑确认集分析，核心看 M2−M1 的增益是否稳定存在。
+- [ ] **Day 7**：AIME 或 GPQA 上做分类器迁移测试（不重训），视确认集结果决定用 M1 还是 M2。
+- [ ] **Day 8**：oracle 差距归因分析 + 关键图（x=平均 token，y=正确率），把 Day 3 的 oracle 数字和分类器结果接起来分析差距来源。
 - [ ] **Day 9**：报告初稿。
 - [ ] **Day 10**：修改定稿。
 
